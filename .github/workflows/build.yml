@@ -137,30 +137,76 @@ jobs:
         run: echo "curseforge.api_key=${CF_API_KEY}" >> local.properties
 
       - name: Build Debug, Beta and Release APKs
-        if: env.HAS_GOOGLE_SERVICES == 'true'
         run: ./gradlew assembleDebug assembleBeta assembleRelease
 
-      - name: Compile Without Firebase Secrets
-        if: env.HAS_GOOGLE_SERVICES == 'false'
-        run: ./gradlew :app:compileDebugKotlin :app:compileDebugJavaWithJavac
+      - name: Prepare signing keystore
+        id: keystore
+        env:
+          SIGNING_KEY_STORE: ${{ secrets.SIGNING_KEY_STORE }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KS="$RUNNER_TEMP/release.keystore"
+          if [ -n "${SIGNING_KEY_STORE:-}" ] && [ -n "${SIGNING_KEY_ALIAS:-}" ]; then
+            printf '%s' "$SIGNING_KEY_STORE" | base64 --decode > "$KS"
+            echo "alias=${SIGNING_KEY_ALIAS}" >> "$GITHUB_OUTPUT"
+            echo "store_password=${SIGNING_STORE_PASSWORD}" >> "$GITHUB_OUTPUT"
+            echo "key_password=${SIGNING_KEY_PASSWORD}" >> "$GITHUB_OUTPUT"
+            echo "source=secret" >> "$GITHUB_OUTPUT"
+          else
+            ALIAS="ci"
+            PASS="cipassword"
+            keytool -genkeypair -v \
+              -keystore "$KS" -alias "$ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$PASS" -keypass "$PASS" \
+              -dname "CN=CI, OU=CI, O=CI, L=CI, S=CI, C=US"
+            echo "alias=${ALIAS}" >> "$GITHUB_OUTPUT"
+            echo "store_password=${PASS}" >> "$GITHUB_OUTPUT"
+            echo "key_password=${PASS}" >> "$GITHUB_OUTPUT"
+            echo "source=generated" >> "$GITHUB_OUTPUT"
+            echo "::notice::Signing keystore secrets are not configured; signed with a temporary CI keystore."
+          fi
+          echo "path=${KS}" >> "$GITHUB_OUTPUT"
+
+      - name: Zipalign and sign release APK
+        env:
+          KS: ${{ steps.keystore.outputs.path }}
+          ALIAS: ${{ steps.keystore.outputs.alias }}
+          STORE_PASS: ${{ steps.keystore.outputs.store_password }}
+          KEY_PASS: ${{ steps.keystore.outputs.key_password }}
+        run: |
+          set -euo pipefail
+          BT="${ANDROID_HOME}/build-tools/35.0.0"
+          UNSIGNED=$(ls app/build/outputs/apk/release/*-unsigned.apk 2>/dev/null | head -1 || true)
+          if [ -z "$UNSIGNED" ]; then
+            UNSIGNED=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          fi
+          ALIGNED="$RUNNER_TEMP/release-aligned.apk"
+          OUT="$RUNNER_TEMP/Levilauncher-release.apk"
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" "$ALIGNED"
+          "$BT/apksigner" sign --ks "$KS" --ks-key-alias "$ALIAS" \
+            --ks-pass "pass:$STORE_PASS" --key-pass "pass:$KEY_PASS" \
+            --out "$OUT" "$ALIGNED"
+          "$BT/apksigner" verify --print-certs "$OUT"
+          echo "SIGNED_APK=$OUT" >> "$GITHUB_ENV"
 
       - name: Upload Debug APK
-        if: env.HAS_GOOGLE_SERVICES == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: PocketCosmosLevi-debug-apk
           path: app/build/outputs/apk/debug/*.apk
 
       - name: Upload Beta APK
-        if: env.HAS_GOOGLE_SERVICES == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: PocketCosmosLevi-beta-apk
           path: app/build/outputs/apk/beta/*.apk
 
-      - name: Upload Unsigned Release APK
-        if: env.HAS_GOOGLE_SERVICES == 'true'
+      - name: Upload Signed Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: PocketCosmosLevi-release-unsigned-apk
-          path: app/build/outputs/apk/release/*.apk
+          name: PocketCosmosLevi-release-apk
+          path: ${{ env.SIGNED_APK }}
