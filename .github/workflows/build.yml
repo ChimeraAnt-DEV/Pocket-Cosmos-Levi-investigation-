@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -210,3 +210,17 @@ jobs:
         with:
           name: PocketCosmosLevi-release-apk
           path: ${{ env.SIGNED_APK }}
+
+      - name: Generate release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python3 scripts/render_release_notes.py resources/launcher/changelog.json release-notes.md
+
+      - name: Publish release with APK
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.SIGNED_APK }}
+          body_path: release-notes.md
+          name: ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
